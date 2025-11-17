@@ -1,0 +1,194 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.5.0
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment || 'dev' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Build Lambda deployment package
+      run: |
+        cd src
+        pip install -r requirements.txt -t package/
+        cp *.py package/
+        cd package
+        zip -r ../lambda.zip .
+        cd ..
+        echo "Lambda package size: $(du -h lambda.zip | cut -f1)"
+    
+    - name: Upload Lambda package to S3
+      run: |
+        LAMBDA_BUCKET="${{ secrets.LAMBDA_BUCKET_NAME }}"
+        aws s3 cp src/lambda.zip s3://${LAMBDA_BUCKET}/lambda/s3-detector-${{ github.sha }}.zip
+        aws s3 cp src/lambda.zip s3://${LAMBDA_BUCKET}/lambda/s3-detector.zip
+        echo "Uploaded to s3://${LAMBDA_BUCKET}/lambda/s3-detector.zip"
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init \
+          -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+          -backend-config="key=s3-detector/${{ github.event.inputs.environment || 'dev' }}/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+    
+    - name: Terraform Plan
+      id: plan
+      run: |
+        cd terraform
+        terraform plan \
+          -var="environment=${{ github.event.inputs.environment || 'dev' }}" \
+          -var="lambda_s3_key=lambda/s3-detector-${{ github.sha }}.zip" \
+          -var-file="environments/${{ github.event.inputs.environment || 'dev' }}.tfvars" \
+          -out=tfplan
+    
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        cd terraform
+        terraform apply -auto-approve tfplan
+    
+    - name: Terraform Apply (Manual)
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        cd terraform
+        terraform apply tfplan
+    
+    - name: Update Lambda function code
+      run: |
+        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment || 'dev' }}"
+        aws lambda update-function-code \
+          --function-name ${FUNCTION_NAME} \
+          --s3-bucket ${{ secrets.LAMBDA_BUCKET_NAME }} \
+          --s3-key lambda/s3-detector-${{ github.sha }}.zip \
+          --publish
+        
+        # Wait for update to complete
+        aws lambda wait function-updated --function-name ${FUNCTION_NAME}
+        
+        echo "Lambda function updated successfully"
+    
+    - name: Run smoke tests
+      run: |
+        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment || 'dev' }}"
+        
+        # Invoke Lambda with test event
+        aws lambda invoke \
+          --function-name ${FUNCTION_NAME} \
+          --payload '{"Records":[]}' \
+          --log-type Tail \
+          response.json
+        
+        # Check response
+        cat response.json
+        
+        if grep -q "statusCode.*200" response.json; then
+          echo "✅ Smoke test passed"
+        else
+          echo "❌ Smoke test failed"
+          exit 1
+        fi
+    
+    - name: Create deployment tag
+      if: success() && github.event.inputs.environment == 'prod'
+      run: |
+        git tag -a "deploy-prod-$(date +%Y%m%d-%H%M%S)" -m "Production deployment"
+        git push origin --tags
+    
+    - name: Notify Slack
+      if: always()
+      uses: slackapi/slack-github-action@v1
+      with:
+        payload: |
+          {
+            "text": "Deployment ${{ job.status }}",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*S3 Bucket Detector Deployment*\n*Status:* ${{ job.status }}\n*Environment:* ${{ github.event.inputs.environment || 'dev' }}\n*Commit:* ${{ github.sha }}\n*Actor:* ${{ github.actor }}"
+                }
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  rollback:
+    name: Rollback
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: deploy
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Rollback Lambda to previous version
+      run: |
+        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment || 'dev' }}"
+        
+        # Get previous version
+        PREVIOUS_VERSION=$(aws lambda list-versions-by-function \
+          --function-name ${FUNCTION_NAME} \
+          --query 'Versions[-2].Version' \
+          --output text)
+        
+        if [ "$PREVIOUS_VERSION" != "None" ]; then
+          # Update alias to point to previous version
+          aws lambda update-alias \
+            --function-name ${FUNCTION_NAME} \
+            --name live \
+            --function-version ${PREVIOUS_VERSION}
+          
+          echo "✅ Rolled back to version ${PREVIOUS_VERSION}"
+        else
+          echo "⚠️ No previous version found for rollback"
+        fi

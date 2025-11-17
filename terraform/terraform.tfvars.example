@@ -1,0 +1,48 @@
+# Copy this file to terraform.tfvars and update with your values
+# cp terraform.tfvars.example terraform.tfvars
+
+# AWS Configuration
+aws_region  = "us-east-1"
+environment = "prod"
+
+# Project Configuration
+project_name = "s3-bucket-detector"
+owner_email  = "security-team@company.com"
+cost_center  = "Security"
+
+# S3 Buckets (must be globally unique)
+reports_bucket_name = "company-s3-detector-reports-prod"
+lambda_bucket_name  = "company-s3-detector-lambda-prod"
+
+# Lambda Configuration
+lambda_s3_key              = "lambda/s3-detector.zip"
+lambda_timeout             = 60
+lambda_memory              = 512
+lambda_reserved_concurrency = 10
+
+# Security Configuration
+auto_remediate_enabled = false  # Set to true to enable automatic remediation
+
+# Monitoring Configuration
+alert_email          = "security-alerts@company.com"
+log_retention_days   = 30
+error_rate_threshold = 5   # Percentage
+dlq_depth_threshold  = 10  # Number of messages
+
+# CloudTrail Configuration
+enable_cloudtrail_s3_data_events = false  # Set to true for object-level events (increases cost)
+monitor_all_regions              = true
+
+# Slack Configuration
+slack_channel = "#security-alerts"
+
+# Allowlist for intentionally public buckets
+allowed_public_buckets = [
+  # "company-public-website",
+  # "company-cdn-origin"
+]
+
+# VPC Configuration (optional, for enhanced security)
+enable_vpc = false
+# vpc_id     = "vpc-xxxxx"
+# subnet_ids = ["subnet-xxxxx", "subnet-yyyyy"]

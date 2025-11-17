@@ -1,0 +1,20 @@
+{
+  "Records": [
+    {
+      "messageId": "test-message-id-123",
+      "receiptHandle": "test-receipt-handle",
+      "body": "{\"version\":\"0\",\"id\":\"test-event-id\",\"detail-type\":\"AWS API Call via CloudTrail\",\"source\":\"aws.s3\",\"account\":\"123456789012\",\"time\":\"2025-11-17T10:30:00Z\",\"region\":\"us-east-1\",\"resources\":[],\"detail\":{\"eventVersion\":\"1.09\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDAI123456789\",\"arn\":\"arn:aws:iam::123456789012:user/john.doe\",\"accountId\":\"123456789012\",\"userName\":\"john.doe\"},\"eventTime\":\"2025-11-17T10:30:00Z\",\"eventSource\":\"s3.amazonaws.com\",\"eventName\":\"PutBucketAcl\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"192.0.2.1\",\"userAgent\":\"aws-cli/2.13.0\",\"requestParameters\":{\"bucketName\":\"test-public-bucket\",\"AccessControlPolicy\":{\"AccessControlList\":{\"Grant\":[{\"Grantee\":{\"Type\":\"Group\",\"URI\":\"http://acs.amazonaws.com/groups/global/AllUsers\"},\"Permission\":\"READ\"}]}}},\"responseElements\":null,\"requestID\":\"test-request-id\",\"eventID\":\"test-event-id\",\"readOnly\":false,\"resources\":[{\"type\":\"AWS::S3::Bucket\",\"ARN\":\"arn:aws:s3:::test-public-bucket\"}],\"eventType\":\"AwsApiCall\",\"managementEvent\":true,\"recipientAccountId\":\"123456789012\"}}",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1700000000000",
+        "SenderId": "AIDAI123456789",
+        "ApproximateFirstReceiveTimestamp": "1700000000000"
+      },
+      "messageAttributes": {},
+      "md5OfBody": "test-md5",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:us-east-1:123456789012:s3-detector-queue",
+      "awsRegion": "us-east-1"
+    }
+  ]
+}
