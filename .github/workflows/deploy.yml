@@ -1,8 +1,6 @@
 name: Deploy
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       environment:
@@ -21,9 +19,9 @@ env:
 
 jobs:
   deploy:
-    name: Deploy to ${{ github.event.inputs.environment || 'dev' }}
+    name: Deploy to ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'dev' }}
+    environment: ${{ github.event.inputs.environment }}
     
     steps:
     - name: Checkout code
@@ -76,26 +74,18 @@ jobs:
       run: |
         cd terraform
         terraform plan \
-          -var="environment=${{ github.event.inputs.environment || 'dev' }}" \
+          -var="environment=${{ github.event.inputs.environment }}" \
           -var="lambda_s3_key=lambda/s3-detector-${{ github.sha }}.zip" \
-          -var-file="environments/${{ github.event.inputs.environment || 'dev' }}.tfvars" \
           -out=tfplan
     
     - name: Terraform Apply
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
         cd terraform
         terraform apply -auto-approve tfplan
     
-    - name: Terraform Apply (Manual)
-      if: github.event_name == 'workflow_dispatch'
-      run: |
-        cd terraform
-        terraform apply tfplan
-    
     - name: Update Lambda function code
       run: |
-        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment || 'dev' }}"
+        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment }}"
         aws lambda update-function-code \
           --function-name ${FUNCTION_NAME} \
           --s3-bucket ${{ secrets.LAMBDA_BUCKET_NAME }} \
@@ -109,7 +99,7 @@ jobs:
     
     - name: Run smoke tests
       run: |
-        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment || 'dev' }}"
+        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment }}"
         
         # Invoke Lambda with test event
         aws lambda invoke \
@@ -122,9 +112,9 @@ jobs:
         cat response.json
         
         if grep -q "statusCode.*200" response.json; then
-          echo "✅ Smoke test passed"
+          echo "Smoke test passed"
         else
-          echo "❌ Smoke test failed"
+          echo "Smoke test failed"
           exit 1
         fi
     
@@ -135,7 +125,7 @@ jobs:
         git push origin --tags
     
     - name: Notify Slack
-      if: always()
+      if: always() && secrets.SLACK_WEBHOOK_URL != ''
       uses: slackapi/slack-github-action@v1
       with:
         payload: |
@@ -146,7 +136,7 @@ jobs:
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": "*S3 Bucket Detector Deployment*\n*Status:* ${{ job.status }}\n*Environment:* ${{ github.event.inputs.environment || 'dev' }}\n*Commit:* ${{ github.sha }}\n*Actor:* ${{ github.actor }}"
+                  "text": "S3 Bucket Detector Deployment\nStatus: ${{ job.status }}\nEnvironment: ${{ github.event.inputs.environment }}\nCommit: ${{ github.sha }}\nActor: ${{ github.actor }}"
                 }
               }
             ]
@@ -173,7 +163,7 @@ jobs:
     
     - name: Rollback Lambda to previous version
       run: |
-        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment || 'dev' }}"
+        FUNCTION_NAME="s3-bucket-detector-${{ github.event.inputs.environment }}"
         
         # Get previous version
         PREVIOUS_VERSION=$(aws lambda list-versions-by-function \

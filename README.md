@@ -115,7 +115,7 @@ Value Delivered:
 ├── docs/
 │   ├── SLACK_SETUP.md
 │   ├── MULTI_ACCOUNT.md
-│   └── COST_ANALYSIS.md
+│   └── GITHUB_ACTIONS_SETUP.md
 └── scripts/
     ├── deploy.sh
     └── test_integration.sh
@@ -135,6 +135,8 @@ Value Delivered:
 ---
 
 ## Quick Start
+
+Note: For GitHub Actions CI/CD setup, see [docs/GITHUB_ACTIONS_SETUP.md](docs/GITHUB_ACTIONS_SETUP.md)
 
 ### 1. Clone and Setup
 
