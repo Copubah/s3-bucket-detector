@@ -9,7 +9,7 @@ from typing import Dict, Any
 import boto3
 from botocore.exceptions import ClientError
 import urllib3
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class SlackNotifier:
             if response.status != 200:
                 raise Exception(f"Slack API returned status {response.status}: {response.data}")
             
-            logger.info(f"Slack notification sent for bucket {report['bucket_name']}")
+            logger.info('Slack notification sent for bucket %s', report['bucket_name'])
             
         except Exception as e:
             logger.error(f"Failed to send Slack notification: {str(e)}")
@@ -65,7 +65,7 @@ class SlackNotifier:
             self._webhook_url = secret.get('webhook_url', '')
             return self._webhook_url
         except ClientError as e:
-            logger.error(f"Failed to retrieve Slack webhook from Secrets Manager: {str(e)}")
+            logger.error('Failed to retrieve Slack webhook from Secrets Manager: %s', e)
             raise
     
     def _build_message(self, report: Dict[str, Any]) -> Dict[str, Any]:
@@ -108,10 +108,10 @@ class SlackNotifier:
             try:
                 dt = datetime.fromisoformat(event_time.replace('Z', '+00:00'))
                 formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
-            except:
+            except (ValueError, TypeError):
                 formatted_time = event_time
         else:
-            formatted_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+            formatted_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
         
         # Build blocks
         blocks = [

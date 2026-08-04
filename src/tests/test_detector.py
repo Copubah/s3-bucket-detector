@@ -7,13 +7,7 @@ from unittest.mock import Mock, patch, MagicMock
 from botocore.exceptions import ClientError
 import json
 
-from detector import S3BucketDetector
-
-
-@pytest.fixture
-def detector():
-    """Create detector instance"""
-    return S3BucketDetector()
+from detector import S3BucketDetector, _is_restrictive_condition
 
 
 @pytest.fixture
@@ -21,6 +15,12 @@ def mock_s3_client():
     """Mock S3 client"""
     with patch('detector.boto3.client') as mock:
         yield mock.return_value
+
+
+@pytest.fixture
+def detector(mock_s3_client):
+    """Create detector instance (after S3 client is mocked)"""
+    return S3BucketDetector()
 
 
 class TestPublicAccessBlock:
@@ -184,8 +184,8 @@ class TestBucketPolicy:
         
         assert result['is_public'] is True
     
-    def test_policy_with_conditions(self, detector, mock_s3_client):
-        """Test policy with restrictive conditions (not truly public)"""
+    def test_policy_with_non_restrictive_ip_condition(self, detector, mock_s3_client):
+        """Wildcard principal + non-restrictive IP condition is still flagged as public"""
         policy = {
             'Version': '2012-10-17',
             'Statement': [
@@ -196,20 +196,74 @@ class TestBucketPolicy:
                     'Resource': 'arn:aws:s3:::test-bucket/*',
                     'Condition': {
                         'IpAddress': {
-                            'aws:SourceIp': '192.0.2.0/24'
+                            'aws:SourceIp': '0.0.0.0/0'
                         }
                     }
                 }
             ]
         }
-        
+
         mock_s3_client.get_bucket_policy.return_value = {
             'Policy': json.dumps(policy)
         }
-        
+
         result = detector._check_bucket_policy('test-bucket')
-        
-        # With conditions, not considered truly public
+
+        assert result['is_public'] is True
+
+    def test_policy_with_unrelated_condition_key(self, detector, mock_s3_client):
+        """Wildcard principal + condition on an unrelated key is flagged as public"""
+        policy = {
+            'Version': '2012-10-17',
+            'Statement': [
+                {
+                    'Effect': 'Allow',
+                    'Principal': '*',
+                    'Action': 's3:GetObject',
+                    'Resource': 'arn:aws:s3:::test-bucket/*',
+                    'Condition': {
+                        'StringEquals': {
+                            'aws:RequestedRegion': 'us-east-1'
+                        }
+                    }
+                }
+            ]
+        }
+
+        mock_s3_client.get_bucket_policy.return_value = {
+            'Policy': json.dumps(policy)
+        }
+
+        result = detector._check_bucket_policy('test-bucket')
+
+        # Region condition doesn't restrict who can access the bucket
+        assert result['is_public'] is True
+
+    def test_policy_with_restrictive_org_condition(self, detector, mock_s3_client):
+        """Wildcard principal restricted to an AWS Org is NOT considered public"""
+        policy = {
+            'Version': '2012-10-17',
+            'Statement': [
+                {
+                    'Effect': 'Allow',
+                    'Principal': '*',
+                    'Action': 's3:GetObject',
+                    'Resource': 'arn:aws:s3:::test-bucket/*',
+                    'Condition': {
+                        'StringEquals': {
+                            'aws:PrincipalOrgID': 'o-exampleorgid'
+                        }
+                    }
+                }
+            ]
+        }
+
+        mock_s3_client.get_bucket_policy.return_value = {
+            'Policy': json.dumps(policy)
+        }
+
+        result = detector._check_bucket_policy('test-bucket')
+
         assert result['is_public'] is False
     
     def test_no_bucket_policy(self, detector, mock_s3_client):
@@ -327,3 +381,47 @@ class TestAllowlist:
         result = detector._is_allowlisted('test-bucket', {})
         
         assert result is False
+
+
+class TestIsRestrictiveCondition:
+    """Unit tests for the _is_restrictive_condition helper"""
+
+    def test_empty_condition_is_not_restrictive(self):
+        assert _is_restrictive_condition({}) is False
+
+    def test_none_condition_is_not_restrictive(self):
+        assert _is_restrictive_condition(None) is False
+
+    def test_org_id_condition_is_restrictive(self):
+        condition = {'StringEquals': {'aws:PrincipalOrgID': 'o-abc123'}}
+        assert _is_restrictive_condition(condition) is True
+
+    def test_principal_account_condition_is_restrictive(self):
+        condition = {'StringEquals': {'aws:PrincipalAccount': '123456789012'}}
+        assert _is_restrictive_condition(condition) is True
+
+    def test_source_vpc_condition_is_restrictive(self):
+        condition = {'StringEquals': {'aws:SourceVpc': 'vpc-12345'}}
+        assert _is_restrictive_condition(condition) is True
+
+    def test_open_cidr_is_not_restrictive(self):
+        condition = {'IpAddress': {'aws:SourceIp': '0.0.0.0/0'}}
+        assert _is_restrictive_condition(condition) is False
+
+    def test_ipv6_open_cidr_is_not_restrictive(self):
+        condition = {'IpAddress': {'aws:SourceIp': '::/0'}}
+        assert _is_restrictive_condition(condition) is False
+
+    def test_narrow_ip_range_is_not_restrictive(self):
+        # IpAddress key is not in the restrictive allowlist unless it's 0.0.0.0/0;
+        # a narrow range is still not recognised as restrictive by the heuristic.
+        condition = {'IpAddress': {'aws:SourceIp': '192.0.2.0/24'}}
+        assert _is_restrictive_condition(condition) is False
+
+    def test_unrelated_key_is_not_restrictive(self):
+        condition = {'StringEquals': {'aws:RequestedRegion': 'us-east-1'}}
+        assert _is_restrictive_condition(condition) is False
+
+    def test_list_of_open_cidrs_is_not_restrictive(self):
+        condition = {'IpAddress': {'aws:SourceIp': ['0.0.0.0/0', '10.0.0.0/8']}}
+        assert _is_restrictive_condition(condition) is False

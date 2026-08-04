@@ -2,6 +2,7 @@
 Unit tests for S3 Bucket Remediator
 """
 
+import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from botocore.exceptions import ClientError
@@ -10,16 +11,16 @@ from remediator import S3BucketRemediator
 
 
 @pytest.fixture
-def remediator():
-    """Create remediator instance"""
-    return S3BucketRemediator()
-
-
-@pytest.fixture
 def mock_s3_client():
     """Mock S3 client"""
     with patch('remediator.boto3.client') as mock:
         yield mock.return_value
+
+
+@pytest.fixture
+def remediator(mock_s3_client):
+    """Create remediator instance (after S3 client is mocked)"""
+    return S3BucketRemediator()
 
 
 class TestPublicAccessBlockRemediation:
@@ -85,24 +86,83 @@ class TestPolicyRemediation:
     """Test bucket policy remediation"""
     
     def test_delete_public_policy_success(self, remediator, mock_s3_client):
-        """Test successful policy deletion"""
+        """Test successful policy deletion when all statements are public"""
+        # Simulate a live policy with only the public statement
+        live_policy = {
+            'Version': '2012-10-17',
+            'Statement': [
+                {
+                    'Sid': 'PublicRead',
+                    'Effect': 'Allow',
+                    'Principal': '*',
+                    'Action': ['s3:GetObject'],
+                    'Resource': 'arn:aws:s3:::test-bucket/*'
+                }
+            ]
+        }
+        mock_s3_client.get_bucket_policy.return_value = {'Policy': json.dumps(live_policy)}
         mock_s3_client.delete_bucket_policy.return_value = {}
-        
+
         detection_result = {
             'details': {
                 'policy': {
                     'public_statements': [
-                        {'sid': 'PublicRead', 'actions': ['s3:GetObject']}
+                        {'sid': 'PublicRead', 'actions': ['s3:GetObject'], 'resources': []}
                     ]
                 }
             }
         }
-        
+
         result = remediator._remediate_bucket_policy('test-bucket', detection_result)
-        
+
         assert result['success'] is True
         assert result['action'] == 'deleted_bucket_policy'
         mock_s3_client.delete_bucket_policy.assert_called_once_with(Bucket='test-bucket')
+
+    def test_removes_only_public_statements(self, remediator, mock_s3_client):
+        """Test that only public statements are removed, leaving legitimate ones intact"""
+        live_policy = {
+            'Version': '2012-10-17',
+            'Statement': [
+                {
+                    'Sid': 'PublicRead',
+                    'Effect': 'Allow',
+                    'Principal': '*',
+                    'Action': ['s3:GetObject'],
+                    'Resource': 'arn:aws:s3:::test-bucket/*'
+                },
+                {
+                    'Sid': 'CloudFrontOAI',
+                    'Effect': 'Allow',
+                    'Principal': {'AWS': 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity'},
+                    'Action': 's3:GetObject',
+                    'Resource': 'arn:aws:s3:::test-bucket/*'
+                }
+            ]
+        }
+        mock_s3_client.get_bucket_policy.return_value = {'Policy': json.dumps(live_policy)}
+        mock_s3_client.put_bucket_policy.return_value = {}
+
+        detection_result = {
+            'details': {
+                'policy': {
+                    'public_statements': [
+                        {'sid': 'PublicRead', 'actions': ['s3:GetObject'], 'resources': []}
+                    ]
+                }
+            }
+        }
+
+        result = remediator._remediate_bucket_policy('test-bucket', detection_result)
+
+        assert result['success'] is True
+        assert result['action'] == 'removed_public_statements_from_policy'
+        mock_s3_client.delete_bucket_policy.assert_not_called()
+
+        put_call_args = mock_s3_client.put_bucket_policy.call_args
+        applied_policy = json.loads(put_call_args[1]['Policy'])
+        remaining_sids = [s['Sid'] for s in applied_policy['Statement']]
+        assert remaining_sids == ['CloudFrontOAI']
     
     def test_no_public_policy(self, remediator, mock_s3_client):
         """Test when no public policy exists"""
@@ -120,22 +180,22 @@ class TestPolicyRemediation:
         assert result['action'] == 'no_public_policy_found'
     
     def test_policy_already_deleted(self, remediator, mock_s3_client):
-        """Test when policy is already deleted"""
-        mock_s3_client.delete_bucket_policy.side_effect = ClientError(
+        """Test when policy is already deleted (get_bucket_policy returns NoSuchBucketPolicy)"""
+        mock_s3_client.get_bucket_policy.side_effect = ClientError(
             {'Error': {'Code': 'NoSuchBucketPolicy'}},
-            'DeleteBucketPolicy'
+            'GetBucketPolicy'
         )
-        
+
         detection_result = {
             'details': {
                 'policy': {
-                    'public_statements': [{'sid': 'test'}]
+                    'public_statements': [{'sid': 'test', 'actions': [], 'resources': []}]
                 }
             }
         }
-        
+
         result = remediator._remediate_bucket_policy('test-bucket', detection_result)
-        
+
         assert result['success'] is True
         assert result['action'] == 'no_policy_to_delete'
 
@@ -258,14 +318,83 @@ class TestRetryLogic:
     
     @patch('remediator.time.sleep')
     def test_max_retries_exceeded(self, mock_sleep, remediator):
-        """Test max retries exceeded"""
+        """Test max retries exceeded raises the original ClientError"""
         mock_func = Mock()
         mock_func.side_effect = ClientError(
             {'Error': {'Code': 'Throttling'}},
             'TestOperation'
         )
-        
-        with pytest.raises(Exception, match='Max retries'):
+
+        with pytest.raises(ClientError):
             remediator._retry_with_backoff(mock_func)
-        
+
         assert mock_func.call_count == 3
+
+
+class TestRetryWrappingOnMutatingCalls:
+    """Verify that the three mutating S3 calls use _retry_with_backoff"""
+
+    @patch('remediator.time.sleep')
+    def test_put_public_access_block_retries_on_throttle(self, mock_sleep, remediator, mock_s3_client):
+        """put_public_access_block is retried on throttling"""
+        mock_s3_client.put_public_access_block.side_effect = [
+            ClientError({'Error': {'Code': 'Throttling', 'Message': ''}}, 'PutPublicAccessBlock'),
+            {}
+        ]
+
+        result = remediator._enable_public_access_block('test-bucket')
+
+        assert result['success'] is True
+        assert mock_s3_client.put_public_access_block.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch('remediator.time.sleep')
+    def test_put_bucket_acl_retries_on_throttle(self, mock_sleep, remediator, mock_s3_client):
+        """put_bucket_acl is retried on throttling"""
+        mock_s3_client.put_bucket_acl.side_effect = [
+            ClientError({'Error': {'Code': 'TooManyRequests', 'Message': ''}}, 'PutBucketAcl'),
+            {}
+        ]
+
+        result = remediator._remove_public_acl('test-bucket')
+
+        assert result['success'] is True
+        assert mock_s3_client.put_bucket_acl.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch('remediator.time.sleep')
+    def test_delete_bucket_policy_retries_on_throttle(self, mock_sleep, remediator, mock_s3_client):
+        """delete_bucket_policy is retried on throttling"""
+        live_policy = {
+            'Version': '2012-10-17',
+            'Statement': [
+                {
+                    'Sid': 'PublicRead',
+                    'Effect': 'Allow',
+                    'Principal': '*',
+                    'Action': ['s3:GetObject'],
+                    'Resource': 'arn:aws:s3:::test-bucket/*'
+                }
+            ]
+        }
+        mock_s3_client.get_bucket_policy.return_value = {'Policy': json.dumps(live_policy)}
+        mock_s3_client.delete_bucket_policy.side_effect = [
+            ClientError({'Error': {'Code': 'RequestLimitExceeded', 'Message': ''}}, 'DeleteBucketPolicy'),
+            {}
+        ]
+
+        detection_result = {
+            'details': {
+                'policy': {
+                    'public_statements': [
+                        {'sid': 'PublicRead', 'actions': ['s3:GetObject'], 'resources': []}
+                    ]
+                }
+            }
+        }
+
+        result = remediator._remediate_bucket_policy('test-bucket', detection_result)
+
+        assert result['success'] is True
+        assert mock_s3_client.delete_bucket_policy.call_count == 2
+        mock_sleep.assert_called_once()
