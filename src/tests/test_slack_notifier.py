@@ -11,12 +11,6 @@ from slack_notifier import SlackNotifier
 
 
 @pytest.fixture
-def notifier():
-    """Create notifier instance"""
-    return SlackNotifier('arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret')
-
-
-@pytest.fixture
 def mock_secrets_client():
     """Mock Secrets Manager client"""
     with patch('slack_notifier.boto3.client') as mock:
@@ -28,6 +22,12 @@ def mock_http():
     """Mock HTTP client"""
     with patch('slack_notifier.urllib3.PoolManager') as mock:
         yield mock.return_value
+
+
+@pytest.fixture
+def notifier(mock_secrets_client, mock_http):
+    """Create notifier instance (after clients are mocked)"""
+    return SlackNotifier('arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret')
 
 
 @pytest.fixture
@@ -99,10 +99,26 @@ class TestMessageBuilding:
     def test_build_message_structure(self, notifier, sample_report):
         """Test message structure"""
         message = notifier._build_message(sample_report)
-        
+
         assert 'blocks' in message
         assert 'text' in message
         assert len(message['blocks']) > 0
+
+    def test_build_message_uses_timezone_aware_fallback(self, notifier, sample_report):
+        """When event_time is missing, the timestamp uses timezone-aware datetime"""
+        sample_report['event_time'] = ''
+        message = notifier._build_message(sample_report)
+        message_str = json.dumps(message)
+        # Just verify a UTC timestamp appears somewhere in the message
+        assert 'UTC' in message_str
+
+    def test_build_message_invalid_event_time_falls_back_gracefully(self, notifier, sample_report):
+        """Invalid event_time is caught by (ValueError, TypeError) and falls back to raw string"""
+        sample_report['event_time'] = 'not-a-date'
+        # Should not raise
+        message = notifier._build_message(sample_report)
+        message_str = json.dumps(message)
+        assert 'not-a-date' in message_str
     
     def test_build_message_with_remediation(self, notifier, sample_report):
         """Test message with remediation info"""

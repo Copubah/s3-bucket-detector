@@ -65,7 +65,8 @@ Value Delivered:
 5. Secrets Manager: Securely stores Slack webhook URL
 6. CloudWatch: Logs, metrics, and alarms for observability
 7. S3 Reports Bucket: Stores audit trail of all detections and remediations
-8. Slack: Real-time notifications to security team with actionable context
+8. DynamoDB (optional): Idempotency table — deduplicates SQS redeliveries so each CloudTrail event is processed at most once
+9. Slack: Real-time notifications to security team with actionable context
 
 ---
 
@@ -200,6 +201,32 @@ aws lambda update-function-configuration \
 
 Warning: Test thoroughly in a sandbox environment before enabling in production.
 
+Note: When AUTO_REMEDIATE is enabled, the remediator removes only the public statements from a bucket policy rather than deleting the entire policy. Legitimate statements (e.g. CloudFront OAI grants, cross-account access) are preserved. If no legitimate statements remain after removing the public ones, the policy is deleted entirely.
+
+### Enable Idempotency (recommended)
+
+SQS delivers messages at-least-once, so the same CloudTrail event can arrive more than once. To prevent duplicate alerts and duplicate remediations, provision a DynamoDB table and set `IDEMPOTENCY_TABLE_NAME`:
+
+```bash
+# Create the table (TTL attribute: ttl)
+aws dynamodb create-table \
+  --table-name s3-detector-idempotency \
+  --attribute-definitions AttributeName=event_id,AttributeType=S \
+  --key-schema AttributeName=event_id,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+
+aws dynamodb update-time-to-live \
+  --table-name s3-detector-idempotency \
+  --time-to-live-specification Enabled=true,AttributeName=ttl
+
+# Wire it to the Lambda
+aws lambda update-function-configuration \
+  --function-name s3-bucket-detector \
+  --environment Variables={IDEMPOTENCY_TABLE_NAME=s3-detector-idempotency}
+```
+
+If `IDEMPOTENCY_TABLE_NAME` is not set, the Lambda processes every delivery (original behaviour).
+
 ### Multi-Account Setup
 
 See [docs/MULTI_ACCOUNT.md](docs/MULTI_ACCOUNT.md) for cross-account deployment using AWS Organizations and centralized monitoring.
@@ -325,6 +352,8 @@ Check bucket public access block settings:
 ```bash
 aws s3api get-public-access-block --bucket BUCKET_NAME
 ```
+
+The policy detector flags wildcard-principal (`Principal: "*"`) Allow statements as public unless the `Condition` block uses a genuinely restrictive key (e.g. `aws:PrincipalOrgID`, `aws:SourceVpc`). Conditions based on IP ranges, tags, or unrelated keys are treated as non-restrictive. If a bucket is flagged but you consider it safe, add the tag `PublicAccessApproved=true` or add the bucket name to `ALLOWED_PUBLIC_BUCKETS`.
 
 ### High Lambda costs
 
